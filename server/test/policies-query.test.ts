@@ -54,6 +54,15 @@ test("autopilot refunds the small not-as-described claim, dry-runs duplicates, m
   assert.equal((await deps.paypal.getDispute(disputeIdFor(7))).messages!.length, before);
 });
 
+test("concurrent runAutopilot calls are queued sequentially to protect the daily cap", async () => {
+  const s = structuredClone(DEFAULT_SETTINGS);
+  s.autopilot = true;
+  s.dailyAutoAcceptLimit = 15;
+  const deps = setup(s);
+  const [r1, r2] = await Promise.all([runAutopilot(deps, [disputeIdFor(8)]), runAutopilot(deps, [disputeIdFor(8)])]);
+  assert.equal(r1.acted + r2.acted, 1);
+});
+
 test("daily auto-refund cap blocks further automatic refunds", async () => {
   const s = structuredClone(DEFAULT_SETTINGS);
   s.autopilot = true;

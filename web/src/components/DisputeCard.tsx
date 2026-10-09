@@ -27,11 +27,23 @@ export function DisputeCard({ id, onClose, onChanged, onToast }: { id: string; o
   };
 
   useEffect(() => {
+    let active = true;
+    setLoading("Loading case file...");
+    setError(null);
     api
       .dispute(id)
-      .then(apply)
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(null));
+      .then((v) => {
+        if (active) apply(v);
+      })
+      .catch((e: Error) => {
+        if (active) setError(e.message);
+      })
+      .finally(() => {
+        if (active) setLoading(null);
+      });
+    return () => {
+      active = false;
+    };
   }, [id]);
 
   const run = async (label: string, fn: () => Promise<CaseView>, done: string) => {

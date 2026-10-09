@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../src/app.ts";
-import { MockPayPalClient } from "../src/paypal/mock.ts";
+import { MockPayPalClient, signMockWebhook } from "../src/paypal/mock.ts";
 import { disputeIdFor } from "../src/paypal/fixtures.ts";
 import { createToolRunner, ask, sanitizeSchema } from "../src/agent/assistant.ts";
 import type { ChatResult, Llm, ToolCall } from "../src/agent/llm.ts";
@@ -34,6 +34,22 @@ test("GET /api/disputes returns a row per dispute with a rule-based score", asyn
     assert.equal(one.buyer, "Emily Carter");
   } finally {
     await s.close();
+  }
+});
+
+test("serveStatic handles malformed percent-encoded URIs gracefully and accept claim validates accept_claim_type", async () => {
+  const paypal = new MockPayPalClient();
+  const app = createApp({ paypal, llm: null, llmNames: [], tools: null, dataDir: null, staticDir: process.cwd() });
+  await new Promise<void>((r) => app.server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  try {
+    const res = await fetch(`${base}/%ff`);
+    assert.equal(res.status, 400);
+    const id = disputeIdFor(1);
+    const badTypeRes = await fetch(`${base}/api/disputes/${id}/accept`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ note: "Accepted", accept_claim_type: "INVALID_TYPE" }) });
+    assert.equal(badTypeRes.status, 400);
+  } finally {
+    await new Promise((r) => app.server.close(r));
   }
 });
 
@@ -72,6 +88,26 @@ test("simulated CUSTOMER.DISPUTE.CREATED webhook is verified, analyzed and handl
     const audit = (await s.call("GET", "/api/audit")).body as AuditEntry[];
     const forId = audit.filter((e) => e.disputeId === id).map((e) => `${e.actor}:${e.action}:${e.outcome}`);
     assert.deepEqual(forId.reverse(), ["webhook:CUSTOMER.DISPUTE.CREATED:ok", "agent:analyze:ok", "agent:accept-claim:ok"]);
+  } finally {
+    await s.close();
+  }
+});
+
+test("a redelivered webhook event is acknowledged but processed only once", async () => {
+  const s = await start();
+  try {
+    const event = { id: "WH-DUP-1", create_time: new Date().toISOString(), resource_type: "dispute", event_type: "CUSTOMER.DISPUTE.UPDATED", resource: { dispute_id: disputeIdFor(1) } };
+    const body = JSON.stringify(event);
+    const time = new Date().toISOString();
+    const headers = { "paypal-auth-algo": "SHA256withRSA", "paypal-cert-url": "https://api.sandbox.paypal.com/x", "paypal-transmission-id": "t-dup", "paypal-transmission-time": time, "paypal-transmission-sig": signMockWebhook("t-dup", time, "WH-MOCK-DISPUTEDESK", body) };
+    const first = await s.call("POST", "/api/webhooks/paypal", body, headers);
+    const second = await s.call("POST", "/api/webhooks/paypal", body, headers);
+    await s.app.idle();
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.equal(second.body.duplicate, true);
+    const analyses = ((await s.call("GET", "/api/audit")).body as AuditEntry[]).filter((e) => e.action === "analyze" && e.disputeId === disputeIdFor(1));
+    assert.equal(analyses.length, 1);
   } finally {
     await s.close();
   }

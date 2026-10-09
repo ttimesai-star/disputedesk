@@ -146,13 +146,14 @@ function knownIdentifiers(file: CaseFile): Set<string> {
   }
   for (const t of file.trackers) add(t.tracking_number);
   add(file.order?.id);
+  for (const id of file.facts.refundIds) add(id);
   return ids;
 }
 
 /** Long alphanumeric tokens with digits look like tracking numbers or ids; any we did not supply is a hallucination. */
 export function inventsIdentifiers(text: string, known: Set<string>): boolean {
   const tokens = text.toUpperCase().match(/\b(?=[A-Z0-9-]*\d)[A-Z0-9-]{10,}\b/g) ?? [];
-  return tokens.some((t) => !known.has(t) && !/^\d{4}-\d{2}-\d{2}$/.test(t));
+  return tokens.some((t) => !known.has(t) && !/^\d{4}-\d{2}-\d{2}(T\d{2})?$/.test(t));
 }
 
 function cleanText(v: unknown, max: number, known: Set<string>): string | null {

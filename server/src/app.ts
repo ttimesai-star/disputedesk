@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { PayPalApiError, type PayPalGateway } from "./paypal/client.ts";
 import { MockPayPalClient, signMockWebhook } from "./paypal/mock.ts";
@@ -78,6 +78,14 @@ export function createApp(deps: AppDeps): App {
       return { status: 401, body: { error: "signature verification failed" } };
     }
     const disputeId = event.resource?.dispute_id ?? null;
+    // PayPal redelivers an event until it gets a 2xx; acknowledge repeats without acting twice.
+    const dedupeKey = event.id || h.transmissionId;
+    if (seenWebhookEvents.has(dedupeKey)) {
+      audit.record({ actor: "webhook", action: event.event_type, disputeId, outcome: "skipped", detail: `Duplicate delivery of ${dedupeKey} ignored` });
+      return { status: 200, body: { received: true, duplicate: true } };
+    }
+    if (seenWebhookEvents.size >= 5000) seenWebhookEvents.delete(seenWebhookEvents.values().next().value!);
+    seenWebhookEvents.add(dedupeKey);
     audit.record({ actor: "webhook", action: event.event_type, disputeId, outcome: "ok", detail: event.summary ?? "verified" });
     if (disputeId && event.event_type.startsWith("CUSTOMER.DISPUTE.")) {
       pipeline.invalidate(disputeId);
@@ -95,11 +103,12 @@ export function createApp(deps: AppDeps): App {
     return { status: 200, body: { received: true } };
   }
   const certFetcher = cachedCertFetcher();
+  const seenWebhookEvents = new Set<string>();
 
   async function route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const m = req.method ?? "GET";
     const p = url.pathname;
-    const disputeMatch = p.match(/^\/api\/disputes\/([A-Za-z0-9-]+)(?:\/(analyze|evidence|accept|message))?$/);
+    const disputeMatch = p.match(/^\/api\/disputes\/([A-Za-z0-9_-]+)(?:\/(analyze|evidence|accept|message))?$/);
 
     if (m === "GET" && p === "/api/health") {
       const info: HealthInfo = { ok: true, paypal: deps.paypal.mode, llm: deps.llmNames, toolkit: !!deps.tools };
@@ -135,6 +144,10 @@ export function createApp(deps: AppDeps): App {
         const body = (await readJson(req)) as { note?: string; accept_claim_type?: AcceptClaimType };
         const note = String(body.note ?? "").trim();
         if (!note) throw new HttpError(400, "note is required");
+        const ALLOWED_ACCEPT_TYPES: AcceptClaimType[] = ["REFUND", "REFUND_WITH_RETURN", "PARTIAL_REFUND", "REFUND_WITH_RETURN_SHIPMENT_LABEL"];
+        if (body.accept_claim_type && !ALLOWED_ACCEPT_TYPES.includes(body.accept_claim_type)) {
+          throw new HttpError(400, `invalid accept_claim_type: ${body.accept_claim_type}`);
+        }
         const d = await deps.paypal.getDispute(id);
         await act(id, "accept-claim", d.dispute_amount, () => deps.paypal.acceptClaim(id, { note: note.slice(0, 2000), ...(body.accept_claim_type ? { accept_claim_type: body.accept_claim_type } : {}) }), note.slice(0, 160));
         return json(res, 200, await pipeline.analyze(id, { useLlm: false, force: true }));
@@ -305,8 +318,16 @@ function serveStatic(res: ServerResponse, pathname: string, dir?: string): void 
     return;
   }
   const root = resolve(dir);
-  let file = resolve(join(root, normalize(decodeURIComponent(pathname))));
-  if (!file.startsWith(root)) {
+  let decodedPath = pathname;
+  try {
+    decodedPath = decodeURIComponent(pathname);
+  } catch {
+    res.writeHead(400, { "content-type": "text/plain" }).end("Bad Request");
+    return;
+  }
+  const rootWithSep = root.endsWith(sep) ? root : root + sep;
+  let file = resolve(join(root, normalize(decodedPath)));
+  if (file !== root && !file.startsWith(rootWithSep)) {
     res.writeHead(403).end();
     return;
   }

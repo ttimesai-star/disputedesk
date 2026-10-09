@@ -80,11 +80,15 @@ export function DisputesGrid({ rows, query, selected, onSelect }: { rows: Disput
     [],
   );
 
+  const applyQuery = (gridApi: GridApi<DisputeRow>) => {
+    gridApi.setFilterModel(query?.filterModel ?? null);
+    gridApi.applyColumnState({ state: query?.sort ? [{ colId: query.sort.colId, sort: query.sort.sort }] : [{ colId: "dueInDays", sort: "asc" }], defaultState: { sort: null } });
+  };
+
   useEffect(() => {
     const api = apiRef.current;
     if (!api) return;
-    api.setFilterModel(query?.filterModel ?? null);
-    api.applyColumnState({ state: query?.sort ? [{ colId: query.sort.colId, sort: query.sort.sort }] : [{ colId: "dueInDays", sort: "asc" }], defaultState: { sort: null } });
+    applyQuery(api);
   }, [query, rows]);
 
   useEffect(() => {
@@ -103,6 +107,7 @@ export function DisputesGrid({ rows, query, selected, onSelect }: { rows: Disput
         rowSelection={{ mode: "singleRow", checkboxes: false, enableClickSelection: true }}
         onGridReady={(e: GridReadyEvent<DisputeRow>) => {
           apiRef.current = e.api;
+          applyQuery(e.api);
         }}
         onRowClicked={(e: RowClickedEvent<DisputeRow>) => e.data && onSelect(e.data.disputeId)}
         rowClassRules={{ "row-resolved": (p) => p.data?.status === "RESOLVED" }}

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createSign, generateKeyPairSync } from "node:crypto";
-import { crc32, isTrustedCertUrl, readWebhookHeaders, verifyWebhookOffline } from "../src/paypal/webhook.ts";
+import { cachedCertFetcher, crc32, isTrustedCertUrl, readWebhookHeaders, verifyWebhookOffline } from "../src/paypal/webhook.ts";
 import { MockPayPalClient, signMockWebhook } from "../src/paypal/mock.ts";
 
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -35,6 +35,33 @@ test("offline verification rejects tampering, wrong webhook id, foreign certs an
   assert.equal(await verifyWebhookOffline({ ...h, authAlgo: "SHA1withRSA" }, "WH-1", enc(body), opts), false);
   const old = signed(body, { time: "2026-10-10T10:00:00Z" });
   assert.equal(await verifyWebhookOffline(old, "WH-1", enc(body), opts), false);
+});
+
+test("cachedCertFetcher respects maxCacheSize limit", async () => {
+  let fetched = 0;
+  const mockFetch = (async (url: RequestInfo | URL) => {
+    fetched++;
+    return new Response(`pem-${String(url)}`, { status: 200 });
+  }) as typeof fetch;
+  const fetcher = cachedCertFetcher(mockFetch, 2);
+  await fetcher("https://api.sandbox.paypal.com/cert/1");
+  await fetcher("https://api.sandbox.paypal.com/cert/2");
+  assert.equal(fetched, 2);
+  await fetcher("https://api.sandbox.paypal.com/cert/1");
+  assert.equal(fetched, 2);
+  await fetcher("https://api.sandbox.paypal.com/cert/3");
+  assert.equal(fetched, 3);
+  await fetcher("https://api.sandbox.paypal.com/cert/1");
+  assert.equal(fetched, 4);
+});
+
+test("offline verification rejects replayed transmission ids when seenTransmissionIds is passed", async () => {
+  const body = '{"event_type":"CUSTOMER.DISPUTE.CREATED"}';
+  const seen = new Set<string>();
+  const verifyOpts = { ...opts, seenTransmissionIds: seen };
+  const h = signed(body);
+  assert.equal(await verifyWebhookOffline(h, "WH-1", new TextEncoder().encode(body), verifyOpts), true);
+  assert.equal(await verifyWebhookOffline(h, "WH-1", new TextEncoder().encode(body), verifyOpts), false);
 });
 
 test("trusted cert hosts are PayPal over https only", () => {

@@ -134,65 +134,73 @@ export interface AutopilotDeps {
   audit: AuditLog;
 }
 
-/** Runs policies over the given disputes (or all that need seller action). Respects kill switch and daily cap. */
+let autopilotQueue: Promise<unknown> = Promise.resolve();
+
+/** Runs policies over the given disputes (or all that need seller action). Respects kill switch and daily cap. Synchronized to prevent concurrent races. */
 export async function runAutopilot(deps: AutopilotDeps, disputeIds?: string[], actor: "agent" = "agent"): Promise<{ acted: number; skipped: number }> {
-  const settings = deps.policies.get();
-  if (!settings.autopilot) {
-    deps.audit.record({ actor: "system", action: "autopilot", disputeId: null, outcome: "skipped", detail: "Autopilot is off" });
-    return { acted: 0, skipped: 0 };
-  }
-  const ids = disputeIds ?? (await deps.paypal.listDisputes({ dispute_state: "REQUIRED_ACTION" })).items.map((d) => d.dispute_id);
-  let acted = 0;
-  let skipped = 0;
-  for (const id of ids) {
-    let view: CaseView;
-    try {
-      view = await deps.pipeline.analyze(id);
-    } catch (e) {
-      deps.audit.record({ actor, action: "analyze", disputeId: id, outcome: "error", detail: (e as Error).message });
-      continue;
+  const run = async () => {
+    const settings = deps.policies.get();
+    if (!settings.autopilot) {
+      deps.audit.record({ actor: "system", action: "autopilot", disputeId: null, outcome: "skipped", detail: "Autopilot is off" });
+      return { acted: 0, skipped: 0 };
     }
-    const policy = matchPolicy(view, settings);
-    if (!policy) {
-      skipped++;
-      continue;
-    }
-    const a = view.assessment!;
-    const amount = view.dispute.dispute_amount;
-    if (policy.action === "ACCEPT") {
-      const used = deps.audit.autoAcceptedToday();
-      if (!policy.dryRun && used + Number(amount.value) > settings.dailyAutoAcceptLimit) {
-        deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "skipped", detail: `Policy "${policy.name}" matched but the daily auto-refund cap (${settings.dailyAutoAcceptLimit}) would be exceeded`, amount });
+    const ids = disputeIds ?? (await deps.paypal.listDisputes({ dispute_state: "REQUIRED_ACTION" })).items.map((d) => d.dispute_id);
+    let acted = 0;
+    let skipped = 0;
+    for (const id of ids) {
+      let view: CaseView;
+      try {
+        view = await deps.pipeline.analyze(id);
+      } catch (e) {
+        deps.audit.record({ actor, action: "analyze", disputeId: id, outcome: "error", detail: (e as Error).message });
+        continue;
+      }
+      const policy = matchPolicy(view, settings);
+      if (!policy) {
         skipped++;
         continue;
       }
-      if (policy.dryRun) {
-        deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "dry-run", detail: `Policy "${policy.name}": would accept (${a.acceptType ?? "REFUND"}). ${a.rationale[0] ?? ""}`, amount });
+      const a = view.assessment!;
+      const amount = view.dispute.dispute_amount;
+      if (policy.action === "ACCEPT") {
+        const used = deps.audit.autoAcceptedToday();
+        if (!policy.dryRun && used + Number(amount.value) > settings.dailyAutoAcceptLimit) {
+          deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "skipped", detail: `Policy "${policy.name}" matched but the daily auto-refund cap (${settings.dailyAutoAcceptLimit}) would be exceeded`, amount });
+          skipped++;
+          continue;
+        }
+        if (policy.dryRun) {
+          deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "dry-run", detail: `Policy "${policy.name}": would accept (${a.acceptType ?? "REFUND"}). ${a.rationale[0] ?? ""}`, amount });
+        } else {
+          try {
+            const allowed = view.dispute.allowed_response_options?.accept_claim?.accept_claim_types;
+            const type = a.acceptType && (!allowed || allowed.includes(a.acceptType)) ? a.acceptType : undefined;
+            await deps.paypal.acceptClaim(id, { note: a.acceptNote, ...(type ? { accept_claim_type: type } : {}) });
+            deps.pipeline.invalidate(id);
+            deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "ok", detail: `Policy "${policy.name}": accepted. ${a.rationale[0] ?? ""}`, amount });
+          } catch (e) {
+            deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "error", detail: (e as Error).message, amount });
+          }
+        }
       } else {
-        try {
-          const allowed = view.dispute.allowed_response_options?.accept_claim?.accept_claim_types;
-          const type = a.acceptType && (!allowed || allowed.includes(a.acceptType)) ? a.acceptType : undefined;
-          await deps.paypal.acceptClaim(id, { note: a.acceptNote, ...(type ? { accept_claim_type: type } : {}) });
-          deps.pipeline.invalidate(id);
-          deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "ok", detail: `Policy "${policy.name}": accepted. ${a.rationale[0] ?? ""}`, amount });
-        } catch (e) {
-          deps.audit.record({ actor, action: "accept-claim", disputeId: id, outcome: "error", detail: (e as Error).message, amount });
+        if (policy.dryRun) {
+          deps.audit.record({ actor, action: "send-message", disputeId: id, outcome: "dry-run", detail: `Policy "${policy.name}": would send "${a.buyerMessage.slice(0, 120)}"` });
+        } else {
+          try {
+            await deps.paypal.sendMessage(id, a.buyerMessage);
+            deps.pipeline.invalidate(id);
+            deps.audit.record({ actor, action: "send-message", disputeId: id, outcome: "ok", detail: `Policy "${policy.name}": ${a.buyerMessage.slice(0, 160)}` });
+          } catch (e) {
+            deps.audit.record({ actor, action: "send-message", disputeId: id, outcome: "error", detail: (e as Error).message });
+          }
         }
       }
-    } else {
-      if (policy.dryRun) {
-        deps.audit.record({ actor, action: "send-message", disputeId: id, outcome: "dry-run", detail: `Policy "${policy.name}": would send "${a.buyerMessage.slice(0, 120)}"` });
-      } else {
-        try {
-          await deps.paypal.sendMessage(id, a.buyerMessage);
-          deps.pipeline.invalidate(id);
-          deps.audit.record({ actor, action: "send-message", disputeId: id, outcome: "ok", detail: `Policy "${policy.name}": ${a.buyerMessage.slice(0, 160)}` });
-        } catch (e) {
-          deps.audit.record({ actor, action: "send-message", disputeId: id, outcome: "error", detail: (e as Error).message });
-        }
-      }
+      acted++;
     }
-    acted++;
-  }
-  return { acted, skipped };
+    return { acted, skipped };
+  };
+
+  const next = autopilotQueue.then(run, run);
+  autopilotQueue = next.catch(() => undefined);
+  return next as Promise<{ acted: number; skipped: number }>;
 }

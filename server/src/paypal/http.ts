@@ -98,6 +98,7 @@ export class HttpPayPalClient implements PayPalGateway {
     if (res.status === 401) {
       // Token revoked or expired early: refresh once.
       this.token = null;
+      this.tokenInFlight = null;
       res = await send(await this.getAccessToken());
     }
     if (!res.ok) throw await toApiError(res, `${method} ${path} failed`);
@@ -196,7 +197,7 @@ export class HttpPayPalClient implements PayPalGateway {
 }
 
 function encodeId(id: string): string {
-  if (!/^[A-Za-z0-9-]+$/.test(id)) throw new Error(`Invalid PayPal id: ${id}`);
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error(`Invalid PayPal id: ${id}`);
   return id;
 }
 

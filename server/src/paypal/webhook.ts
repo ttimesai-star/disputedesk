@@ -48,6 +48,8 @@ export interface OfflineVerifyOptions {
   /** Reject transmissions older than this (replay protection). Default 10 minutes. */
   maxAgeMs?: number;
   now?: () => number;
+  /** Optional set of seen transmission IDs to reject replayed webhooks. */
+  seenTransmissionIds?: Set<string>;
 }
 
 /**
@@ -59,20 +61,29 @@ export interface OfflineVerifyOptions {
 export async function verifyWebhookOffline(h: WebhookHeaders, webhookId: string, rawBody: Uint8Array, opts: OfflineVerifyOptions): Promise<boolean> {
   if (h.authAlgo !== "SHA256withRSA") return false;
   if (!isTrustedCertUrl(h.certUrl)) return false;
+  if (opts.seenTransmissionIds?.has(h.transmissionId)) return false;
   const sent = Date.parse(h.transmissionTime);
   const now = (opts.now ?? Date.now)();
   if (Number.isNaN(sent) || Math.abs(now - sent) > (opts.maxAgeMs ?? 10 * 60_000)) return false;
   const pem = await opts.fetchCert(h.certUrl);
   const message = `${h.transmissionId}|${h.transmissionTime}|${webhookId}|${crc32(rawBody)}`;
   try {
-    return createVerify("RSA-SHA256").update(message).verify(pem, h.transmissionSig, "base64");
+    const ok = createVerify("RSA-SHA256").update(message).verify(pem, h.transmissionSig, "base64");
+    if (ok && opts.seenTransmissionIds) {
+      if (opts.seenTransmissionIds.size >= 1000) {
+        const first = opts.seenTransmissionIds.keys().next().value;
+        if (first !== undefined) opts.seenTransmissionIds.delete(first);
+      }
+      opts.seenTransmissionIds.add(h.transmissionId);
+    }
+    return ok;
   } catch {
     return false;
   }
 }
 
-/** Fetches a PayPal certificate with a small in-memory cache. */
-export function cachedCertFetcher(fetchImpl: typeof fetch = fetch): (url: string) => Promise<string> {
+/** Fetches a PayPal certificate with a size-bounded in-memory cache (max 100 entries). */
+export function cachedCertFetcher(fetchImpl: typeof fetch = fetch, maxCacheSize = 100): (url: string) => Promise<string> {
   const cache = new Map<string, string>();
   return async (url) => {
     const hit = cache.get(url);
@@ -80,6 +91,10 @@ export function cachedCertFetcher(fetchImpl: typeof fetch = fetch): (url: string
     const res = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new Error(`Certificate download failed: HTTP ${res.status}`);
     const pem = await res.text();
+    if (cache.size >= maxCacheSize) {
+      const firstKey = cache.keys().next().value;
+      if (firstKey !== undefined) cache.delete(firstKey);
+    }
     cache.set(url, pem);
     return pem;
   };

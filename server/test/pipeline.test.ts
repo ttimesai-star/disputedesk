@@ -138,6 +138,7 @@ test("pipeline caches per update_time and skips the LLM for resolved disputes", 
 test("identifier guard flags unknown id-like tokens only", () => {
   const known = new Set(["9405511899223197428490"]);
   assert.equal(inventsIdentifiers("Tracking 9405511899223197428490 shows delivered on 2026-09-24.", known), false);
+  assert.equal(inventsIdentifiers("Updated at 2026-10-10T12:00:00Z for item.", known), false);
   assert.equal(inventsIdentifiers("Tracking 9405511899223100000099 shows delivered.", known), true);
   assert.equal(inventsIdentifiers("A hand-thrown vase, reactive glaze.", known), false);
 });

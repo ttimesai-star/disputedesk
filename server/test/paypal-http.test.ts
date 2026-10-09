@@ -122,8 +122,11 @@ test("PayPal error bodies become PayPalApiError with issue and debug_id", async 
 });
 
 test("ids are validated before they reach a URL", async () => {
-  const { c } = client(() => ok({}));
+  const { f, c } = client(() => ok({ dispute_id: "PP-D-1234_1" }));
   await assert.rejects(c.getDispute("../v1/oauth2/token"), /Invalid PayPal id/);
+  const res = await c.getDispute("PP-D-1234_1");
+  assert.equal(res.dispute_id, "PP-D-1234_1");
+  assert.equal(f.calls[1]!.url, "https://api-m.sandbox.paypal.com/v1/customer/disputes/PP-D-1234_1");
 });
 
 test("gateway factory: mock without credentials, sandbox with, live refused", () => {
