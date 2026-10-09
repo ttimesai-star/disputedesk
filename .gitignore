@@ -1,0 +1,8 @@
+node_modules/
+web/dist/
+.env
+.env.*
+!.env.example
+*.log
+# Runtime state (action journal, policies) stays local
+data/

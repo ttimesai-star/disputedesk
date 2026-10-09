@@ -1,0 +1,26 @@
+{
+  "name": "disputedesk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DisputeDesk: an AI copilot for PayPal sellers that triages disputes and chargebacks, drafts evidence and recommends accept or fight.",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "workspaces": ["web"],
+  "scripts": {
+    "dev:server": "node --watch server/src/index.ts",
+    "dev:web": "npm --workspace web run dev",
+    "start": "node server/src/index.ts",
+    "analyze": "node server/src/cli.ts",
+    "build": "npm --workspace web run build",
+    "typecheck": "tsc -p server/tsconfig.json && npm --workspace web run typecheck",
+    "test": "node --test \"server/test/*.test.ts\""
+  },
+  "dependencies": {
+    "@paypal/agent-toolkit": "1.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.0"
+  }
+}

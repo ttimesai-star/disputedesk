@@ -1,0 +1,21 @@
+name: ci
+on: [push, pull_request]
+permissions: { contents: read }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: smoke test (mock PayPal, no LLM, no secrets)
+        run: |
+          PORT=8787 node server/src/index.ts &
+          for i in $(seq 1 30); do curl -sf localhost:8787/api/health && break; sleep 1; done
+          curl -sf localhost:8787/api/disputes | grep -q '"recommendation":"FIGHT"'
+          curl -sf -X POST localhost:8787/api/demo/simulate-dispute | grep -q '"received":true'
+          curl -sf localhost:8787/ | grep -q '<div id="root">'
