@@ -92,7 +92,24 @@ npm run analyze -- PP-D-41137    # CLI: analyze one dispute (or all open ones wi
 npm run dev:server & npm run dev:web   # hot reload during development
 ```
 
-**Sandbox setup.** Create a sandbox app in the [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/applications/sandbox), copy the client id and secret, and add a webhook to `https://<your-host>/api/webhooks/paypal` subscribed to `CUSTOMER.DISPUTE.CREATED`, `CUSTOMER.DISPUTE.UPDATED` and `CUSTOMER.DISPUTE.RESOLVED`. The dashboard's Webhooks Simulator can then send test events.
+**Sandbox setup.**
+
+1. In the [PayPal Developer Dashboard](https://developer.paypal.com/dashboard/applications/sandbox) (Sandbox mode) click **Create App**, type *Merchant*, linked to your default sandbox business account.
+2. In the app's **Features** enable **Customer disputes** (Disputes API) and **Transaction search** (Reporting API, used to find refunds), then **Save Changes**. A scope added later shows up only in a newly issued token; PayPal reuses a cached token for up to 9 hours.
+3. Copy the client id and secret into `.env` (never commit it; `.env` is git-ignored):
+   ```bash
+   cp .env.example .env
+   # PAYPAL_CLIENT_ID=...  PAYPAL_CLIENT_SECRET=...  PAYPAL_ENV=sandbox
+   ```
+4. Check the keys:
+   ```bash
+   curl -s -u "$PAYPAL_CLIENT_ID:$PAYPAL_CLIENT_SECRET" -d grant_type=client_credentials \
+     https://api-m.sandbox.paypal.com/v1/oauth2/token
+   ```
+5. Add a webhook to `https://<your-host>/api/webhooks/paypal` subscribed to `CUSTOMER.DISPUTE.CREATED`, `CUSTOMER.DISPUTE.UPDATED` and `CUSTOMER.DISPUTE.RESOLVED`, and put its id in `PAYPAL_WEBHOOK_ID`. The dashboard's Webhooks Simulator can then send test events.
+6. To get real sandbox disputes: log in at `https://www.sandbox.paypal.com` as the sandbox *personal* (buyer) account, pay the business account (for example through an order created with `POST /v2/checkout/orders`), then open a dispute from the buyer's Resolution Center. It appears in `GET /v1/customer/disputes` for the business account.
+
+With both variables set the server switches from the mock to the sandbox automatically; remove them to go back to mock mode.
 
 **Security notes.** The server binds to `127.0.0.1` by default because the dashboard can issue refunds and has no login; set `HOST=0.0.0.0` only inside a private network. Secrets are read from the environment only and never logged. Webhooks with missing or invalid signatures are rejected with 401.
 

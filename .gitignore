@@ -6,3 +6,4 @@ web/dist/
 *.log
 # Runtime state (action journal, policies) stays local
 data/
+NOTES_sandbox.md
